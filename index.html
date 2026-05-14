@@ -374,6 +374,22 @@ footer{padding:52px 0 32px;background:var(--off-white);border-top:1px solid var(
   .header-right img{display:none;}
 }
 </style>
+
+<!-- ══ Amplitude アクセス解析 ══ -->
+<script src="https://cdn.amplitude.com/libs/analytics-browser-2.11.1-min.js.gz"></script>
+<script>
+window.amplitude.init('8d3b5be866c4740fa6c83949f85ce25e', {
+  defaultTracking: false,
+  logLevel: window.amplitude.Types.LogLevel.Warn,
+});
+// LP識別プロパティをセット
+const _identify = new window.amplitude.Identify();
+_identify.set('lp_name', 'shigyou-v1');
+_identify.set('lp_label', '士業DX診断LP');
+window.amplitude.identify(_identify);
+// ページビュー計測
+window.amplitude.track('page_view', { lp: 'shigyou-v1' });
+</script>
 </head>
 <body>
 
@@ -1191,6 +1207,8 @@ const DX = (() => {
     reset();
     $('dx-modal-overlay').classList.add('open');
     document.body.style.overflow = 'hidden';
+    // Amplitude: 診断開始
+    if(window.amplitude) window.amplitude.track('diagnosis_click', { lp: 'shigyou-v1' });
   }
 
   function close() {
@@ -1378,6 +1396,8 @@ const DX = (() => {
     const gcalUrl = `${DX_CONFIG.GCAL_BASE}&text=${eventTitle}&details=${eventDesc}&dates=${fmt(start)}/${fmt(end)}`;
     $('dx-gcal-btn').href = gcalUrl;
 
+    // Amplitude: 予約完了
+    if(window.amplitude) window.amplitude.track('booking_complete', { lp: 'shigyou-v1', score: score, level: level.title });
     // 完了表示
     $('dx-result').style.display = 'none';
     $('dx-nav').style.display = 'none';
