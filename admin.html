@@ -216,6 +216,12 @@ body{background:var(--page-bg);color:var(--text-main);font-family:var(--font-san
   </div>
 </div>
 
+
+<!-- ══ LP監視一覧セクション ══ -->
+<div style="margin-top:2rem;margin-bottom:1rem">
+  <div class="sec-lbl">LP MONITOR — 稼働中のLP一覧</div>
+  <div id="lp-monitor-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1.25rem"></div>
+</div>
 <script>
 const ADMIN_PASSWORD = 'nexccess2026';
 function checkAuth(){
@@ -297,6 +303,7 @@ async function loadAll(){
   }
   renderStats(LIVE);renderActivity(MOCK.activity);renderTopEvents(MOCK.topEvents);renderTrend(MOCK.trend);renderFCBClicks(MOCK.fcbClicks);renderABTable(MOCK.abTest);
   await refreshAI();
+  await renderLpMonitor();
 }
 
 function renderStats(d){
@@ -335,6 +342,75 @@ async function refreshAI(){
     el.textContent=`診断完了率 ${r}%・問い合わせ転換率 ${c}% で推移。次のアクション：直近のLINEタップ数を確認し、未返信の問い合わせを今日中に優先対応してください。`;
   }
 }
+
+/* ══ LP監視データ ══ */
+const LP_LIST = [
+  {
+    id: 'finance-v3',
+    label: '日本政策金融公庫 融資伴走LP',
+    url: 'https://www.seisakukinyukouko.site/',
+    variant: 'kouko-v3（現行）',
+    color: '#00897B',
+    ampKey: '8d3b5be866c4740fa6c83949f85ce25e',
+    events: { pv: 'page_view', diag: 'diagnosis_click', contact: 'fcb_click' },
+    status: 'live',
+  },
+  {
+    id: 'shigyou-v1',
+    label: '士業DX診断LP',
+    url: 'https://pathfkow-shigyou.vercel.app',
+    variant: 'shigyou-v1（稼働中）',
+    color: '#C8A45A',
+    ampKey: '8d3b5be866c4740fa6c83949f85ce25e',
+    events: { pv: 'page_view', diag: 'diagnosis_click', contact: 'booking_complete' },
+    status: 'live',
+  },
+];
+
+async function fetchLpStats(lp) {
+  if (!isAmpConfigured()) return { pv: '–', diag: '–', contact: '–', rate: '–' };
+  const [pv, diag, contact] = await Promise.all([
+    fetchAmpSegmentation(lp.events.pv),
+    fetchAmpSegmentation(lp.events.diag),
+    fetchAmpSegmentation(lp.events.contact),
+  ]);
+  const pvN = pv ?? 0;
+  const diagN = diag ?? 0;
+  const rate = pvN > 0 ? (diagN / pvN * 100).toFixed(1) + '%' : '–';
+  return { pv: pvN || '–', diag: diagN || '–', contact: contact ?? '–', rate };
+}
+
+async function renderLpMonitor() {
+  const grid = document.getElementById('lp-monitor-grid');
+  if (!grid) return;
+  grid.innerHTML = LP_LIST.map(lp => `
+    <div class="card" style="border-top:3px solid ${lp.color}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <div>
+          <div style="font-size:.78rem;font-weight:700;letter-spacing:.1em;color:var(--text-sub);text-transform:uppercase">${lp.id}</div>
+          <div style="font-size:1rem;font-weight:600;color:var(--text-main);margin-top:2px">${lp.label}</div>
+        </div>
+        <span style="font-size:.72rem;font-weight:600;padding:.25rem .7rem;border-radius:3px;background:${lp.status==='live'?'#E0F2F0':'#FEF3E6'};color:${lp.status==='live'?'#00897B':'#E67E22'}">${lp.status.toUpperCase()}</span>
+      </div>
+      <div id="lp-stats-${lp.id}" style="display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;text-align:center;margin-bottom:1rem">
+        ${['PV','診断','予約','転換率'].map(l=>`<div style="background:var(--page-bg);border-radius:5px;padding:.6rem .25rem"><div style="font-size:.72rem;color:var(--text-sub);margin-bottom:.3rem">${l}</div><div style="font-family:var(--font-data);font-size:1.3rem;font-weight:700;color:var(--text-main)">…</div></div>`).join('')}
+      </div>
+      <a href="${lp.url}" target="_blank" rel="noopener" style="font-size:.8rem;color:var(--gold-dim);text-decoration:none;border-bottom:1px solid var(--gold-light)">${lp.url}</a>
+    </div>
+  `).join('');
+
+  // 各LPの数値を非同期で取得して更新
+  for (const lp of LP_LIST) {
+    const stats = await fetchLpStats(lp);
+    const el = document.getElementById('lp-stats-' + lp.id);
+    if (!el) continue;
+    const vals = [stats.pv, stats.diag, stats.contact, stats.rate];
+    el.querySelectorAll('div[style*="font-size:1.3rem"]').forEach((d, i) => {
+      d.textContent = vals[i] !== undefined ? vals[i] : '–';
+    });
+  }
+}
+
 if(sessionStorage.getItem('nx-admin-auth')==='1')loadAll();
 </script>
 </body>
