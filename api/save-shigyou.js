@@ -1,114 +1,159 @@
-'use strict';
+// api/save-shigyou.js  – v3.4準拠
+// Nodemailer + Gmail App Password
+import { google } from 'googleapis';
+import nodemailer from 'nodemailer';
 
-const { google } = require('googleapis');
-const { JWT } = require('google-auth-library');
+const SHEET_NAME   = process.env.SHEET_NAME || 'AI診断結果';
+const NOTIFY_EMAIL = process.env.GMAIL_USER  || 'info.nexccess@gmail.com';
 
-function getAuthClient() {
-  let raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '';
-  // 前後の余分なクォート・空白を除去（Vercelコピペ時の混入対策）
-  raw = raw.trim().replace(/^['"]|['"]$/g, '');
-  const credentials = JSON.parse(raw);
-  // 秘密鍵の \\n を実改行に変換
-  const privateKey = credentials.private_key.replace(/\\n/g, '\n');
-  return new JWT({
-    email: credentials.client_email,
-    key: privateKey,
-    scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-  });
-}
+const HEADERS = [
+  '送信日時','LP_ID','お名前','携帯電話','メールアドレス',
+  '希望日時（第1）','希望日時（第2）','おすすめメニュー',
+  'スコア','レベル','診断回答'
+];
 
-module.exports = async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
+  const {
+    name, phone, email,
+    date, time, date2, time2,
+    recommended_menu, score, level,
+    answers, lp
+  } = req.body;
+
+  if (!name || !email) return res.status(400).json({ error: 'name and email required' });
+
+  // ⚠ answersは必ず文字列型で受け取る（v3.4 §5-1）
+  const answersStr = Array.isArray(answers)
+    ? answers.join(' / ')
+    : (typeof answers === 'string' ? answers : '');
+
+  // ⚠ dateはyyyy-mm-dd HH:MM形式・スラッシュ変換禁止（v3.4 §5-1）
+  const date1Str = date ? `${date}${time ? ' ' + time : ''}` : '';
+  const date2Str = date2 ? `${date2}${time2 ? ' ' + time2 : ''}` : '';
+
+  const now = new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' });
 
   try {
-    const SPREADSHEET_ID = process.env.SHIGYOU_SPREADSHEET_ID;
-    if (!SPREADSHEET_ID) throw new Error('SHIGYOU_SPREADSHEET_ID が未設定です');
+    const auth = new google.auth.GoogleAuth({
+      credentials: JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON),
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/calendar',
+      ],
+    });
+    const authClient = await auth.getClient();
 
-    const { row } = req.body;
-    if (!Array.isArray(row)) throw new Error('row が配列ではありません');
+    // ── 1. Spreadsheet書込み ────────────────────────────────
+    const sheets   = google.sheets({ version: 'v4', auth: authClient });
+    const SHEET_ID = process.env.SHIGYOU_SPREADSHEET_ID;
+    const sheetName = SHEET_NAME;
 
-    const auth   = getAuthClient();
-    const sheets = google.sheets({ version: 'v4', auth });
-
-    // シートの存在確認 → なければ作成
-    const meta = await sheets.spreadsheets.get({ spreadsheetId: SPREADSHEET_ID });
-    const sheetExists = meta.data.sheets.some(
-      s => s.properties.title === '士業DX診断結果'
-    );
-    if (!sheetExists) {
-      await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SPREADSHEET_ID,
-        requestBody: {
-          requests: [{ addSheet: { properties: { title: '士業DX診断結果' } } }],
-        },
-      });
-      // ヘッダー行を追加
+    // ヘッダー行チェック（初回のみ自動挿入）
+    const checkRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${sheetName}!A1`,
+    });
+    const firstCell = ((checkRes.data.values || [[]])[0] || [])[0];
+    if (!firstCell) {
       await sheets.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range: '士業DX診断結果!A1',
+        spreadsheetId: SHEET_ID,
+        range: `${sheetName}!A1`,
         valueInputOption: 'USER_ENTERED',
-        requestBody: {
-          values: [[
-            '診断日時','氏名','事務所名','メールアドレス','電話番号',
-            'スコア','レベル','Q1_問い合わせ対応','Q2_データ管理',
-            'Q3_情報発信','Q4_予約方法','流入元'
-          ]],
-        },
+        requestBody: { values: [HEADERS] },
       });
     }
 
-    // データ行を追記
     await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: '士業DX診断結果!A:L',
+      spreadsheetId: SHEET_ID,
+      range: `${sheetName}!A1`,
       valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
-      requestBody: { values: [row] },
+      requestBody: {
+        values: [[
+          now,
+          lp || 'pathflow-v1',
+          name,
+          phone || '',
+          email,
+          date1Str,
+          date2Str,
+          recommended_menu || '',
+          score || '',
+          level || '',
+          answersStr,
+        ]],
+      },
     });
 
-    // ── Resendでメール通知 ──────────────────────────
-    const RESEND_API_KEY = process.env.RESEND_API_KEY;
-    if (RESEND_API_KEY) {
-      await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
+    // ── 2. Googleカレンダー登録（終日イベント）────────────────
+    if (date) {
+      const calendar = google.calendar({ version: 'v3', auth: authClient });
+      // ⚠ attendees・sendUpdates省略（GaxiosError回避 §5-3）
+      await calendar.events.insert({
+        calendarId: process.env.CALENDAR_ID,
+        requestBody: {
+          summary: `【仮予約】${name} 様`,
+          description: [
+            `LP: ${lp || 'pathflow-v1'}`,
+            `お名前: ${name}`,
+            `携帯: ${phone || '-'}`,
+            `メール: ${email}`,
+            `希望日時（第1）: ${date1Str}`,
+            `希望日時（第2）: ${date2Str || '-'}`,
+            `おすすめメニュー: ${recommended_menu || '-'}`,
+            `スコア: ${score} / レベル: ${level}`,
+            `診断回答: ${answersStr}`,
+          ].join('\n'),
+          colorId: '6',
+          start: { date },
+          end:   { date },
         },
-        body: JSON.stringify({
-          from: 'Path-Flow診断 <onboarding@resend.dev>',
-          to: ['naka.kei@nexccess.com'],
-          subject: `【新規予約】${row[1]} 様 ／ スコア${row[5]}点（${row[6]}）`,
-          html: `
-<h2>Path-Flow 士業DX診断 ― 新規予約通知</h2>
-<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:sans-serif;font-size:14px;">
-  <tr><th align="left">診断日時</th><td>${row[0]}</td></tr>
-  <tr><th align="left">氏名</th><td>${row[1]}</td></tr>
-  <tr><th align="left">事務所名</th><td>${row[2] || '―'}</td></tr>
-  <tr><th align="left">メール</th><td>${row[3]}</td></tr>
-  <tr><th align="left">電話</th><td>${row[4] || '―'}</td></tr>
-  <tr><th align="left">スコア</th><td><strong>${row[5]}点</strong></td></tr>
-  <tr><th align="left">レベル</th><td>${row[6]}</td></tr>
-  <tr><th align="left">Q1 問い合わせ対応</th><td>${row[7]}</td></tr>
-  <tr><th align="left">Q2 データ管理</th><td>${row[8]}</td></tr>
-  <tr><th align="left">Q3 情報発信</th><td>${row[9]}</td></tr>
-  <tr><th align="left">Q4 予約方法</th><td>${row[10]}</td></tr>
-</table>
-<p style="margin-top:16px;color:#666;">このメールはPath-Flow診断システムから自動送信されました。</p>
-          `.trim(),
-        }),
       });
     }
 
-    return res.status(200).json({ success: true });
+    // ── 3. Nodemailerメール通知（v3.4 §4-3）
+    try {
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.GMAIL_USER || 'info.nexccess@gmail.com',
+          pass: process.env.GMAIL_APP_PASSWORD,
+        },
+      });
 
-  } catch (error) {
-    console.error('[save-shigyou] Error:', error);
-    return res.status(500).json({ error: error.message });
+      await transporter.sendMail({
+        from: `"Path-Flow" <${process.env.GMAIL_USER || 'info.nexccess@gmail.com'}>`,
+        to:      NOTIFY_EMAIL,
+        replyTo: email,
+        subject: `【Path-Flow 予約通知】${name} 様 / ${date1Str}`,
+        text: [
+          '■ Path-Flow AI診断 予約通知',
+          '',
+          `お名前：${name}`,
+          `携帯電話：${phone || '-'}`,
+          `メール：${email}`,
+          '',
+          `希望日時（第1）：${date1Str}`,
+          `希望日時（第2）：${date2Str || '-'}`,
+          '',
+          `おすすめメニュー：${recommended_menu || '-'}`,
+          `スコア：${score} / レベル：${level}`,
+          '',
+          `診断回答：${answersStr}`,
+          '',
+          `LP識別：${lp || 'pathflow-v1'}`,
+          `送信日時：${now}`,
+        ].join('\n'),
+      });
+    } catch (mailErr) {
+      console.error('Nodemailer error (non-fatal):', mailErr.message);
+    }
+
+    return res.status(200).json({ ok: true });
+
+  } catch (err) {
+    console.error('save-shigyou error:', err.message);
+    return res.status(500).json({ error: err.message });
   }
-};
+}
